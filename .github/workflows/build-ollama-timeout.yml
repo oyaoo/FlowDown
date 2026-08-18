@@ -1,4 +1,4 @@
-name: Build FlowDown - Ollama Timeout
+name: Build FlowDown - Ollama Custom
 
 on:
   workflow_dispatch:
@@ -8,44 +8,149 @@ on:
         required: true
         default: "3600"
 
+permissions:
+  contents: read
+
 jobs:
   build-macos:
-    name: Build macOS
+    name: Build FlowDown macOS
     runs-on: macos-26
 
     steps:
+      # ------------------------------------------------------------
+      # 1. Checkout FlowDown + ChatClientKit submodule
+      # ------------------------------------------------------------
       - name: Checkout FlowDown
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
+      # ------------------------------------------------------------
+      # 2. Validate timeout input
+      # ------------------------------------------------------------
+      - name: Validate timeout
+        env:
+          TIMEOUT: ${{ inputs.timeout_seconds }}
+        run: |
+          if ! [[ "$TIMEOUT" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: timeout must be an integer"
+            exit 1
+          fi
+
+          if [ "$TIMEOUT" -lt 60 ]; then
+            echo "ERROR: timeout must be >= 60 seconds"
+            exit 1
+          fi
+
+          echo "Ollama timeout: ${TIMEOUT} seconds"
+
+      # ------------------------------------------------------------
+      # 3. Change ChatClientKit timeout
+      # ------------------------------------------------------------
       - name: Modify ChatClientKit timeout
         env:
           TIMEOUT: ${{ inputs.timeout_seconds }}
         run: |
-          FILE="Frameworks/ChatClientKit/Sources/ServerEvent/EventSource.swift"
+          python3 <<'PY'
+          from pathlib import Path
+          import os
 
-          echo "Target timeout: ${TIMEOUT} seconds"
-          echo "Before:"
-          grep -n "timeoutInterval: TimeInterval" "$FILE"
+          timeout = os.environ["TIMEOUT"]
 
-          sed -i '' \
-            "s/timeoutInterval: TimeInterval = 300/timeoutInterval: TimeInterval = ${TIMEOUT}/g" \
-            "$FILE"
+          path = Path(
+              "Frameworks/ChatClientKit/"
+              "Sources/ServerEvent/EventSource.swift"
+          )
 
-          echo "After:"
-          grep -n "timeoutInterval: TimeInterval" "$FILE"
+          if not path.exists():
+              raise SystemExit(
+                  f"ERROR: ChatClientKit file not found: {path}"
+              )
 
-          if grep -q "timeoutInterval: TimeInterval = 300" "$FILE"; then
-            echo "ERROR: timeout replacement failed"
-            exit 1
-          fi
+          text = path.read_text()
 
+          old = "timeoutInterval: TimeInterval = 300"
+          new = f"timeoutInterval: TimeInterval = {timeout}"
+
+          count = text.count(old)
+
+          if count == 0:
+              raise SystemExit(
+                  "ERROR: could not find default 300 second timeout"
+              )
+
+          text = text.replace(old, new)
+          path.write_text(text)
+
+          print(f"Replaced {count} timeout occurrence(s)")
+          PY
+
+          echo "Current timeout definitions:"
+          grep -n "timeoutInterval: TimeInterval" \
+            Frameworks/ChatClientKit/Sources/ServerEvent/EventSource.swift
+
+      # ------------------------------------------------------------
+      # 4. Disable real CloudKit for unsigned/ad-hoc build
+      #
+      # This also makes SyncEngine.setSyncEnabled(false) run.
+      # The compile flag below will force SyncEngine.Mode = .mock.
+      # ------------------------------------------------------------
+      - name: Disable CloudKit for local build
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path(
+              "FlowDown/Application/AppEnvironment.swift"
+          )
+
+          if not path.exists():
+              raise SystemExit(
+                  f"ERROR: AppEnvironment.swift not found: {path}"
+              )
+
+          text = path.read_text()
+
+          old = (
+              "let shouldEnableCloudSync = "
+              "SyncEngine.isCloudSyncSupported"
+          )
+
+          new = (
+              "let shouldEnableCloudSync = false "
+              "// local ad-hoc build: CloudKit disabled"
+          )
+
+          count = text.count(old)
+
+          if count != 1:
+              raise SystemExit(
+                  f"ERROR: expected exactly 1 CloudKit setting, found {count}"
+              )
+
+          text = text.replace(old, new, 1)
+          path.write_text(text)
+
+          print("CloudKit disabled for local build.")
+          PY
+
+          grep -n "shouldEnableCloudSync" \
+            FlowDown/Application/AppEnvironment.swift
+
+      # ------------------------------------------------------------
+      # 5. Select Xcode
+      # ------------------------------------------------------------
       - name: Select Newest Xcode
         run: |
           chmod +x Resources/DevKit/scripts/select_newest_xcode.sh
           ./Resources/DevKit/scripts/select_newest_xcode.sh
 
+          echo "Selected Xcode:"
+          xcodebuild -version
+
+      # ------------------------------------------------------------
+      # 6. Resolve Swift packages
+      # ------------------------------------------------------------
       - name: Resolve Packages
         run: |
           set -o pipefail
@@ -59,20 +164,32 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            | xcbeautify --is-ci --disable-colored-output --disable-logging
+            | xcbeautify \
+                --is-ci \
+                --disable-colored-output \
+                --disable-logging
 
+      # ------------------------------------------------------------
+      # 7. FlowDown upstream workaround for mlx-swift
+      # ------------------------------------------------------------
       - name: Strip mlx-swift CUDA Plugin
         run: |
           chmod +x Resources/DevKit/scripts/strip_mlx_cuda_plugin.sh
           ./Resources/DevKit/scripts/strip_mlx_cuda_plugin.sh
 
-      - name: Archive macOS
+      # ------------------------------------------------------------
+      # 8. Build Mac Catalyst archive
+      #
+      # TEST_SIMULATOR_DISABLE_CLOUD_KIT makes FlowDown use
+      # SyncEngine.Mode.mock so CKContainer is never created.
+      # ------------------------------------------------------------
+      - name: Archive FlowDown macOS
         run: |
           set -o pipefail
 
-          xcodebuild -downloadComponent MetalToolchain
-
           mkdir -p BuildArtifacts
+
+          xcodebuild -downloadComponent MetalToolchain
 
           xcodebuild \
             -workspace FlowDown.xcworkspace \
@@ -85,18 +202,223 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            | xcbeautify --is-ci --disable-colored-output --disable-logging
+            'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) TEST_SIMULATOR_DISABLE_CLOUD_KIT' \
+            | xcbeautify \
+                --is-ci \
+                --disable-colored-output \
+                --disable-logging
 
-      - name: Compress Archive
+      # ------------------------------------------------------------
+      # 9. Confirm FlowDown.app exists
+      # ------------------------------------------------------------
+      - name: Locate FlowDown.app
         run: |
-          ditto -c -k --sequesterRsrc --keepParent \
-            "BuildArtifacts/macos.xcarchive" \
-            "BuildArtifacts/macos.xcarchive.zip"
+          APP="BuildArtifacts/macos.xcarchive/Products/Applications/FlowDown.app"
 
-      - name: Upload macOS Archive
+          if [ ! -d "$APP" ]; then
+            echo "ERROR: FlowDown.app not found"
+            find BuildArtifacts/macos.xcarchive -maxdepth 5 -print
+            exit 1
+          fi
+
+          echo "Found:"
+          echo "$APP"
+
+          file "$APP/Contents/MacOS/FlowDown"
+
+      # ------------------------------------------------------------
+      # 10. Generate LOCAL Sandbox entitlements
+      #
+      # Deliberately excludes:
+      # - CloudKit / iCloud
+      # - APS push notification
+      # - application-groups
+      #
+      # Those normally require Apple Developer provisioning.
+      # ------------------------------------------------------------
+      - name: Create local Sandbox entitlements
+        run: |
+          cat > BuildArtifacts/FlowDown-local.entitlements <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>com.apple.security.app-sandbox</key>
+              <true/>
+
+              <key>com.apple.security.network.client</key>
+              <true/>
+
+              <key>com.apple.security.files.user-selected.read-write</key>
+              <true/>
+
+              <key>com.apple.security.device.audio-input</key>
+              <true/>
+
+              <key>com.apple.security.personal-information.calendars</key>
+              <true/>
+
+              <key>com.apple.security.personal-information.photos-library</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
+
+          echo "Local entitlements:"
+          cat BuildArtifacts/FlowDown-local.entitlements
+
+          plutil -lint BuildArtifacts/FlowDown-local.entitlements
+
+      # ------------------------------------------------------------
+      # 11. Ad-hoc sign nested code first
+      #
+      # This replaces the completely unsigned CI result.
+      # ------------------------------------------------------------
+      - name: Ad-hoc sign FlowDown
+        run: |
+          set -e
+
+          APP="BuildArtifacts/macos.xcarchive/Products/Applications/FlowDown.app"
+          ENT="BuildArtifacts/FlowDown-local.entitlements"
+
+          echo "Signing embedded frameworks..."
+
+          codesign \
+            --force \
+            --deep \
+            --sign - \
+            "$APP"
+
+          echo "Signing main application with Sandbox entitlements..."
+
+          codesign \
+            --force \
+            --sign - \
+            --entitlements "$ENT" \
+            "$APP"
+
+      # ------------------------------------------------------------
+      # 12. Verify code signature
+      # ------------------------------------------------------------
+      - name: Verify code signature
+        run: |
+          APP="BuildArtifacts/macos.xcarchive/Products/Applications/FlowDown.app"
+
+          codesign \
+            --verify \
+            --deep \
+            --strict \
+            --verbose=2 \
+            "$APP"
+
+          echo ""
+          echo "Final entitlements:"
+          codesign -d \
+            --entitlements :- \
+            "$APP" \
+            > BuildArtifacts/final-entitlements.plist \
+            2>/dev/null
+
+          cat BuildArtifacts/final-entitlements.plist
+
+      # ------------------------------------------------------------
+      # 13. Ensure Sandbox entitlement really exists
+      #
+      # This is the key check that prevents FlowDown's main.swift
+      # sandbox fatalError at startup.
+      # ------------------------------------------------------------
+      - name: Verify Sandbox entitlement
+        run: |
+          ENT="BuildArtifacts/final-entitlements.plist"
+
+          SANDBOX=$(
+            /usr/libexec/PlistBuddy \
+              -c "Print :com.apple.security.app-sandbox" \
+              "$ENT"
+          )
+
+          NETWORK=$(
+            /usr/libexec/PlistBuddy \
+              -c "Print :com.apple.security.network.client" \
+              "$ENT"
+          )
+
+          echo "App Sandbox: $SANDBOX"
+          echo "Network Client: $NETWORK"
+
+          if [ "$SANDBOX" != "true" ]; then
+            echo "ERROR: App Sandbox entitlement is missing"
+            exit 1
+          fi
+
+          if [ "$NETWORK" != "true" ]; then
+            echo "ERROR: Network client entitlement is missing"
+            exit 1
+          fi
+
+          echo "Sandbox entitlement verification passed."
+
+      # ------------------------------------------------------------
+      # 14. Package FlowDown.app directly
+      # ------------------------------------------------------------
+      - name: Package FlowDown.app
+        env:
+          TIMEOUT: ${{ inputs.timeout_seconds }}
+        run: |
+          APP="BuildArtifacts/macos.xcarchive/Products/Applications/FlowDown.app"
+
+          OUTPUT="BuildArtifacts/FlowDown-Ollama-${TIMEOUT}s.app.zip"
+
+          ditto \
+            -c \
+            -k \
+            --sequesterRsrc \
+            --keepParent \
+            "$APP" \
+            "$OUTPUT"
+
+          echo "Created:"
+          ls -lh "$OUTPUT"
+
+      # ------------------------------------------------------------
+      # 15. Optional: archive the full xcarchive as backup
+      # ------------------------------------------------------------
+      - name: Package xcarchive
+        env:
+          TIMEOUT: ${{ inputs.timeout_seconds }}
+        run: |
+          OUTPUT="BuildArtifacts/FlowDown-Ollama-${TIMEOUT}s.xcarchive.zip"
+
+          ditto \
+            -c \
+            -k \
+            --sequesterRsrc \
+            --keepParent \
+            "BuildArtifacts/macos.xcarchive" \
+            "$OUTPUT"
+
+          ls -lh "$OUTPUT"
+
+      # ------------------------------------------------------------
+      # 16. Upload ready-to-use FlowDown.app
+      # ------------------------------------------------------------
+      - name: Upload FlowDown.app
         uses: actions/upload-artifact@v4
         with:
           name: FlowDown-macOS-Ollama-${{ inputs.timeout_seconds }}s
-          path: BuildArtifacts/macos.xcarchive.zip
+          path: |
+            BuildArtifacts/FlowDown-Ollama-${{ inputs.timeout_seconds }}s.app.zip
+            BuildArtifacts/final-entitlements.plist
+          if-no-files-found: error
+          retention-days: 7
+
+      # ------------------------------------------------------------
+      # 17. Upload xcarchive separately
+      # ------------------------------------------------------------
+      - name: Upload xcarchive
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlowDown-xcarchive-${{ inputs.timeout_seconds }}s
+          path: BuildArtifacts/FlowDown-Ollama-${{ inputs.timeout_seconds }}s.xcarchive.zip
           if-no-files-found: error
           retention-days: 7
