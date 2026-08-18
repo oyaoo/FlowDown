@@ -1,0 +1,102 @@
+name: Build FlowDown - Ollama Timeout
+
+on:
+  workflow_dispatch:
+    inputs:
+      timeout_seconds:
+        description: "Ollama timeout in seconds"
+        required: true
+        default: "3600"
+
+jobs:
+  build-macos:
+    name: Build macOS
+    runs-on: macos-26
+
+    steps:
+      - name: Checkout FlowDown
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Modify ChatClientKit timeout
+        env:
+          TIMEOUT: ${{ inputs.timeout_seconds }}
+        run: |
+          FILE="Frameworks/ChatClientKit/Sources/ServerEvent/EventSource.swift"
+
+          echo "Target timeout: ${TIMEOUT} seconds"
+          echo "Before:"
+          grep -n "timeoutInterval: TimeInterval" "$FILE"
+
+          sed -i '' \
+            "s/timeoutInterval: TimeInterval = 300/timeoutInterval: TimeInterval = ${TIMEOUT}/g" \
+            "$FILE"
+
+          echo "After:"
+          grep -n "timeoutInterval: TimeInterval" "$FILE"
+
+          if grep -q "timeoutInterval: TimeInterval = 300" "$FILE"; then
+            echo "ERROR: timeout replacement failed"
+            exit 1
+          fi
+
+      - name: Select Newest Xcode
+        run: |
+          chmod +x Resources/DevKit/scripts/select_newest_xcode.sh
+          ./Resources/DevKit/scripts/select_newest_xcode.sh
+
+      - name: Resolve Packages
+        run: |
+          set -o pipefail
+
+          xcodebuild -downloadComponent MetalToolchain
+
+          xcodebuild \
+            -workspace FlowDown.xcworkspace \
+            -scheme FlowDown \
+            -resolvePackageDependencies \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            | xcbeautify --is-ci --disable-colored-output --disable-logging
+
+      - name: Strip mlx-swift CUDA Plugin
+        run: |
+          chmod +x Resources/DevKit/scripts/strip_mlx_cuda_plugin.sh
+          ./Resources/DevKit/scripts/strip_mlx_cuda_plugin.sh
+
+      - name: Archive macOS
+        run: |
+          set -o pipefail
+
+          xcodebuild -downloadComponent MetalToolchain
+
+          mkdir -p BuildArtifacts
+
+          xcodebuild \
+            -workspace FlowDown.xcworkspace \
+            -scheme FlowDown \
+            -configuration Release \
+            -destination 'generic/platform=macOS,variant=Mac Catalyst' \
+            archive \
+            -archivePath "BuildArtifacts/macos.xcarchive" \
+            -resultBundlePath "BuildArtifacts/macos.xcresult" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            | xcbeautify --is-ci --disable-colored-output --disable-logging
+
+      - name: Compress Archive
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            "BuildArtifacts/macos.xcarchive" \
+            "BuildArtifacts/macos.xcarchive.zip"
+
+      - name: Upload macOS Archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlowDown-macOS-Ollama-${{ inputs.timeout_seconds }}s
+          path: BuildArtifacts/macos.xcarchive.zip
+          if-no-files-found: error
+          retention-days: 7
