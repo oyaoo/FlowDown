@@ -12,7 +12,6 @@ import ZIPFoundation
 
 public class Storage {
     private static let DeviceIDKey = "FlowdownStorageDeviceId"
-    private static let SyncFirstSetupKey = "FlowdownSyncFirstSetup"
 
     let db: Database
     let initVersion: DBVersion
@@ -26,7 +25,7 @@ public class Storage {
     package weak var syncEngine: SyncEngine?
 
     /// UploadQueue enqueue 事件回调类型
-    package typealias UploadQueueEnqueueHandler = (_ queues: [UploadQueue]) -> Void
+    package typealias UploadQueueEnqueueHandler = () -> Void
     package var uploadQueueEnqueueHandler: UploadQueueEnqueueHandler?
 
     private let existsDatabaseFile: Bool
@@ -99,6 +98,7 @@ public class Storage {
                 MigrationV3ToV4(),
                 MigrationV4ToV5(),
                 MigrationV5ToV6(),
+                MigrationV6ToV7(),
             ]
         } else {
             initVersion = .Version1
@@ -108,6 +108,7 @@ public class Storage {
                 MigrationV3ToV4(),
                 MigrationV4ToV5(),
                 MigrationV5ToV6(),
+                MigrationV6ToV7(),
             ]
         }
 
@@ -169,32 +170,6 @@ public class Storage {
         }
     }
 
-    /// 清除本地所有数据
-    func clearLocalData() throws {
-        try db.run(transaction: {
-            try $0.delete(fromTable: CloudModel.tableName)
-            try $0.delete(fromTable: Attachment.tableName)
-            try $0.delete(fromTable: Message.tableName)
-            try $0.delete(fromTable: Conversation.tableName)
-            try $0.delete(fromTable: ModelContextServer.tableName)
-            try $0.delete(fromTable: Memory.tableName)
-            try $0.delete(fromTable: SyncMetadata.tableName)
-            try $0.delete(fromTable: UploadQueue.tableName)
-            try $0.delete(fromTable: ChatTemplateRecord.tableName)
-            try $0.delete(fromTable: ConversationSummary.tableName)
-
-            let nameColumn = WCDBSwift.Column(named: "name")
-            let seqColumn = WCDBSwift.Column(named: "seq")
-            let updateTableSequence = StatementUpdate()
-                .update(table: "sqlite_sequence")
-                .set(seqColumn)
-                .to(0)
-                .where(nameColumn == UploadQueue.tableName)
-
-            try $0.exec(updateTableSequence)
-        })
-    }
-
     /// 重置上传队列自增ID初始值
     private func resetUploadQueueMaxID() throws {
         let select = StatementSelect().select(UploadQueue.Properties.id.count())
@@ -237,11 +212,6 @@ private extension Storage {
         }
         return initVersion
     }
-
-    func setVersion(_ version: DBVersion) throws {
-        let statement = StatementPragma().pragma(.userVersion).to(version.rawValue)
-        try db.exec(statement)
-    }
 }
 
 public extension Storage {
@@ -256,14 +226,46 @@ public extension Storage {
             do {
                 Logger.database.infoFile("clearDeletedRecords begin")
                 try db.run(transaction: {
-                    try $0.delete(fromTable: Attachment.tableName, where: Attachment.Properties.modified <= deleteAt && Attachment.Properties.removed == true)
-                    try $0.delete(fromTable: Message.tableName, where: Message.Properties.modified <= deleteAt && Message.Properties.removed == true)
-                    try $0.delete(fromTable: Conversation.tableName, where: Conversation.Properties.modified <= deleteAt && Conversation.Properties.removed == true)
-                    try $0.delete(fromTable: CloudModel.tableName, where: CloudModel.Properties.modified <= deleteAt && CloudModel.Properties.removed == true)
-                    try $0.delete(fromTable: Memory.tableName, where: Memory.Properties.modified <= deleteAt && Memory.Properties.removed == true)
-                    try $0.delete(fromTable: ModelContextServer.tableName, where: ModelContextServer.Properties.modified <= deleteAt && ModelContextServer.Properties.removed == true)
-                    try $0.delete(fromTable: ChatTemplateRecord.tableName, where: ChatTemplateRecord.Properties.modified <= deleteAt && ChatTemplateRecord.Properties.removed == true)
-                    try $0.delete(fromTable: ConversationSummary.tableName, where: ConversationSummary.Properties.modified <= deleteAt && ConversationSummary.Properties.removed == true)
+                    try $0.delete(
+                        fromTable: Attachment.tableName,
+                        where: Attachment.Properties.modified <= deleteAt
+                            && Attachment.Properties.removed == true
+                    )
+                    try $0.delete(
+                        fromTable: Message.tableName,
+                        where: Message.Properties.modified <= deleteAt
+                            && Message.Properties.removed == true
+                    )
+                    try $0.delete(
+                        fromTable: Conversation.tableName,
+                        where: Conversation.Properties.modified <= deleteAt
+                            && Conversation.Properties.removed == true
+                    )
+                    try $0.delete(
+                        fromTable: CloudModel.tableName,
+                        where: CloudModel.Properties.modified <= deleteAt
+                            && CloudModel.Properties.removed == true
+                    )
+                    try $0.delete(
+                        fromTable: Memory.tableName,
+                        where: Memory.Properties.modified <= deleteAt
+                            && Memory.Properties.removed == true
+                    )
+                    try $0.delete(
+                        fromTable: ModelContextServer.tableName,
+                        where: ModelContextServer.Properties.modified <= deleteAt
+                            && ModelContextServer.Properties.removed == true
+                    )
+                    try $0.delete(
+                        fromTable: ChatTemplateRecord.tableName,
+                        where: ChatTemplateRecord.Properties.modified <= deleteAt
+                            && ChatTemplateRecord.Properties.removed == true
+                    )
+                    try $0.delete(
+                        fromTable: ConversationSummary.tableName,
+                        where: ConversationSummary.Properties.modified <= deleteAt
+                            && ConversationSummary.Properties.removed == true
+                    )
 
                     try $0.delete(fromTable: CloudModel.tableName, where: CloudModel.Properties.objectId == "")
 
@@ -286,7 +288,9 @@ public extension Storage {
                         where:
                         UploadQueue.Properties.tableName.in(syncTables)
                             && (UploadQueue.Properties.state == UploadQueue.State.finish
-                                || (UploadQueue.Properties.state.in([UploadQueue.State.pending, UploadQueue.State.failed]) && UploadQueue.Properties.failCount >= 100)),
+                                || (UploadQueue.Properties.state
+                                    .in([UploadQueue.State.pending, UploadQueue.State.failed])
+                                    && UploadQueue.Properties.failCount >= 100)),
                     )
 
                 })
@@ -319,6 +323,8 @@ public extension Storage {
                 do {
                     let mods: [CloudModel] = try db.getObjects(fromTable: CloudModel.tableName)
                     try expdb.insert(mods, intoTable: CloudModel.tableName)
+                    let servers: [ModelContextServer] = try db.getObjects(fromTable: ModelContextServer.tableName)
+                    try expdb.insert(servers, intoTable: ModelContextServer.tableName)
                     let cons: [Conversation] = try db.getObjects(fromTable: Conversation.tableName)
                     try expdb.insert(cons, intoTable: Conversation.tableName)
                     let msgs: [Message] = try db.getObjects(fromTable: Message.tableName)
@@ -376,7 +382,11 @@ public extension Storage {
 
             let importedDB = unzipTarget.appendingPathComponent("database.db")
             guard fm.fileExists(atPath: importedDB.path) else {
-                throw NSError(domain: "Storage", code: -1, userInfo: [NSLocalizedDescriptionKey: "Missing database.db in archive"])
+                throw NSError(
+                    domain: "Storage",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "Missing database.db in archive"]
+                )
             }
 
             Logger.database.infoFile("Import the database and execute the migration.")

@@ -129,7 +129,12 @@ final class ConversationSession: Identifiable {
         currentTask?.cancel()
         currentTask = nil
         thinkingDurationTimer.values.forEach { $0.invalidate() }
-        ConversationSessionManager.shared.markSessionCompleted(id)
+        // The last reference can drop on any thread (a cancel poller ends on a
+        // cooperative one), and the manager's execution state is main-confined.
+        let id = id
+        DispatchQueue.main.async {
+            ConversationSessionManager.shared.markSessionCompleted(id)
+        }
     }
 
     init(id: Conversation.ID) {
@@ -149,9 +154,7 @@ final class ConversationSession: Identifiable {
         var visualAuxiliary: ModelManager.ModelIdentifier?
     }
 
-    var models: Models = .init() {
-        didSet { Logger.model.infoFile("models updated \(models)") }
-    }
+    let models = Models()
 
     func prepareSystemPrompt() {
         let modelManager = ModelManager.shared
@@ -287,8 +290,9 @@ final class ConversationSession: Identifiable {
         }
     }
 
+    /// Drops a message created moments ago. It owns no supplement rows, so the
+    /// rows before it (such as this turn's web search) stay.
     func discard(messageIdentifier: Message.ID) {
-        sdb.deleteSupplementMessage(nextTo: messageIdentifier)
         sdb.delete(messageIdentifier: messageIdentifier)
         messages.removeAll { $0.objectId == messageIdentifier }
         attachments[messageIdentifier] = nil

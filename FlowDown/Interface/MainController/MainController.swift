@@ -42,8 +42,23 @@ class MainController: UIViewController {
     static let catalystTitleBarHeight: CGFloat = 32
 
     var allowSidebarPersistence: Bool {
-        guard UIDevice.current.userInterfaceIdiom == .pad else { return false }
-        return UIDevice.current.orientation.isLandscape || view.bounds.width > 800
+        Self.allowsSidebarPersistence(
+            idiom: UIDevice.current.userInterfaceIdiom,
+            size: view.bounds.size,
+        )
+    }
+
+    /// Whether the open sidebar can stay on screen next to the chat.
+    ///
+    /// This reads the window rather than the device, because a narrow window
+    /// in Slide Over or Split View still reports a landscape device, and a
+    /// device laid flat reports no orientation at all. It is never true below
+    /// the width where `updateViewConstraints` switches to the drawer layout,
+    /// since a drawer that persists can no longer be dismissed by selecting a
+    /// conversation or tapping the chat.
+    static func allowsSidebarPersistence(idiom: UIUserInterfaceIdiom, size: CGSize) -> Bool {
+        guard idiom == .pad, size.width >= 500 else { return false }
+        return size.width > size.height || size.width > 800
     }
 
     var sidebarWidth: CGFloat = 256 {
@@ -205,16 +220,10 @@ class MainController: UIViewController {
         setupViews()
     }
 
-    override func viewWillAppear(_ animated: Bool) {
-        super.viewWillAppear(animated)
-    }
-
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         scheduleWelcomeIfNeeded()
     }
-
-    private var previousLayoutRect: CGRect = .zero
 
     /// Whether the chat side accepts input.
     ///
@@ -304,7 +313,9 @@ class MainController: UIViewController {
         lastTouchBegin = .init()
 
         NSObject.cancelPreviousPerformRequests(
-            withTarget: self, selector: #selector(resetGestures), object: nil,
+            withTarget: self,
+            selector: #selector(resetGestures),
+            object: nil,
         )
         perform(#selector(resetGestures), with: nil, afterDelay: 0.25)
     }
@@ -352,7 +363,9 @@ class MainController: UIViewController {
         super.touchesMoved(touches, with: event)
 
         NSObject.cancelPreviousPerformRequests(
-            withTarget: self, selector: #selector(resetGestures), object: nil,
+            withTarget: self,
+            selector: #selector(resetGestures),
+            object: nil,
         )
         perform(#selector(resetGestures), with: nil, afterDelay: 0.25)
         guard presentedViewController == nil else { return }
@@ -393,15 +406,6 @@ class MainController: UIViewController {
         firstTouchLocation = nil
         touchesMoved = false
         updateLayoutGuideToOriginalStatus()
-    }
-
-    @objc private func contentViewButtonTapped() {
-        #if targetEnvironment(macCatalyst)
-            return
-        #else
-            guard !allowSidebarPersistence else { return }
-            view.doWithAnimation { self.isSidebarCollapsed.toggle() }
-        #endif
     }
 
     @objc func requestNewChat() {
@@ -459,7 +463,8 @@ class MainController: UIViewController {
         let trimmedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedMessage.isEmpty else {
             showErrorAlert(
-                title: "Error", message: "Empty message.",
+                title: "Error",
+                message: "Empty message.",
             )
             return
         }
@@ -505,7 +510,10 @@ class MainController: UIViewController {
 }
 
 extension MainController: UIGestureRecognizerDelegate {
-    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith _: UIGestureRecognizer) -> Bool {
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith _: UIGestureRecognizer
+    ) -> Bool {
         gestureRecognizer is UIScreenEdgePanGestureRecognizer
     }
 

@@ -24,6 +24,8 @@ public nonisolated struct ModelExchangeEncryptedPayload: Codable, Equatable, Sen
 }
 
 public nonisolated enum ModelExchangeCrypto {
+    private nonisolated static let hkdfSalt = Data("flowdown-model-exchange".utf8)
+
     public nonisolated static func encrypt(
         _ data: Data,
         for peer: ModelExchangePublicKey,
@@ -58,8 +60,12 @@ public nonisolated enum ModelExchangeCrypto {
         return try ChaChaPoly.open(sealedBox, using: symmetric)
     }
 
-    private nonisolated static func deriveKey(secret: SharedSecret, session: String, peerSigning: Data) -> SymmetricKey {
-        var salt = ModelExchangeAPI.hkdfSalt
+    private nonisolated static func deriveKey(
+        secret: SharedSecret,
+        session: String,
+        peerSigning: Data
+    ) -> SymmetricKey {
+        var salt = hkdfSalt
         salt.append(Data(session.utf8))
         return secret.hkdfDerivedSymmetricKey(
             using: SHA256.self,

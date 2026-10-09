@@ -107,8 +107,8 @@ class EvaluationHistoryController: UIViewController {
                     } catch {
                         Logger.app.errorFile("failed to delete all evaluation sessions: \(error)")
                         let errorAlert = AlertViewController(
-                            title: String(localized: "Error"),
-                            message: error.localizedDescription,
+                            title: "Error",
+                            message: .init(error.localizedDescription),
                         ) { context in
                             context.allowSimpleDispose()
                             context.addAction(title: "OK", attribute: .accent) {
@@ -170,7 +170,10 @@ extension EvaluationHistoryController: UITableViewDelegate {
         tableView.deselectRow(at: indexPath, animated: true)
     }
 
-    func tableView(_: UITableView, trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
+    func tableView(
+        _: UITableView,
+        trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath
+    ) -> UISwipeActionsConfiguration? {
         guard let id = dataSource.itemIdentifier(for: indexPath) else { return nil }
         let delete = UIContextualAction(
             style: .destructive,
@@ -273,8 +276,8 @@ private extension EvaluationHistoryController {
 
                 if let firstError = failure.first {
                     let alert = AlertViewController(
-                        title: String(localized: "Import Failed"),
-                        message: firstError.localizedDescription,
+                        title: "Import Failed",
+                        message: .init(firstError.localizedDescription),
                     ) { context in
                         context.allowSimpleDispose()
                         context.addAction(title: "OK", attribute: .accent) {

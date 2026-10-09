@@ -77,7 +77,6 @@ class EvaluationAssistantController: StackScrollController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        // refreshUI()
         refreshEx()
     }
 
@@ -97,8 +96,8 @@ class EvaluationAssistantController: StackScrollController {
             navigationController?.pushViewController(statusController, animated: true)
         } catch {
             let alert = AlertViewController(
-                title: String(localized: "Failed to Start Session"),
-                message: error.localizedDescription,
+                title: "Failed to Start Session",
+                message: .init(error.localizedDescription),
             ) { context in
                 context.allowSimpleDispose()
             }
@@ -115,11 +114,6 @@ class EvaluationAssistantController: StackScrollController {
 private extension EvaluationAssistantController {
     func attemptsText(_ value: Int) -> String {
         let key: String.LocalizationValue = "\(value) attempts"
-        return String(localized: key)
-    }
-
-    func repeatsText(_ value: Int) -> String {
-        let key: String.LocalizationValue = "Test \(value) times"
         return String(localized: key)
     }
 
@@ -278,20 +272,6 @@ private extension EvaluationAssistantController {
         }
     }
 
-    func isManifestEnabled(_ manifest: EvaluationManifest) -> Bool {
-        options.manifesets.contains(where: { $0 === manifest })
-    }
-
-    func setManifestEnabled(_ manifest: EvaluationManifest, enabled: Bool) {
-        if enabled {
-            if !options.manifesets.contains(where: { $0 === manifest }) {
-                options.manifesets.append(manifest)
-            }
-        } else {
-            options.manifesets.removeAll(where: { $0 === manifest })
-        }
-    }
-
     func isSuiteExcluded(_ id: EvaluationManifest.Suite.ID) -> Bool {
         options.excludedSuites.contains(id)
     }
@@ -303,20 +283,6 @@ private extension EvaluationAssistantController {
             }
         } else {
             options.excludedSuites.removeAll(where: { $0 == id })
-        }
-    }
-
-    func isCaseExcluded(_ id: EvaluationManifest.Suite.Case.ID) -> Bool {
-        options.excludedCases.contains(id)
-    }
-
-    func setCaseExcluded(_ id: EvaluationManifest.Suite.Case.ID, excluded: Bool) {
-        if excluded {
-            if !options.excludedCases.contains(id) {
-                options.excludedCases.append(id)
-            }
-        } else {
-            options.excludedCases.removeAll(where: { $0 == id })
         }
     }
 
@@ -356,22 +322,8 @@ private extension EvaluationAssistantController {
                     defer { if scoped { url.stopAccessingSecurityScopedResource() } }
 
                     let data = try Data(contentsOf: url)
-
-                    // Prefer JSON.
-                    let jsonDecoder: JSONDecoder = {
-                        let decoder = JSONDecoder()
-                        decoder.dateDecodingStrategy = .iso8601
-                        return decoder
-                    }()
-
-                    if let list = try? jsonDecoder.decode([EvaluationManifest].self, from: data) {
-                        imported.append(contentsOf: list)
-                        continue
-                    }
-                    if let one = try? jsonDecoder.decode(EvaluationManifest.self, from: data) {
-                        imported.append(one)
-                        continue
-                    }
+                    let manifests = try EvaluationAssistantController.decodeImportedManifests(from: data)
+                    imported.append(contentsOf: manifests)
                 } catch {
                     failure.append(error)
                 }
@@ -419,6 +371,25 @@ private extension EvaluationAssistantController {
             manifestCatalog.append(item)
             options.manifesets.append(item)
         }
+    }
+}
+
+extension EvaluationAssistantController {
+    /// Decodes a manifest file holding either a list of manifests or a single one,
+    /// and throws the single-manifest decoding error when neither shape fits.
+    nonisolated static func decodeImportedManifests(from data: Data) throws -> [EvaluationManifest] {
+        // Prefer JSON.
+        let jsonDecoder: JSONDecoder = {
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            return decoder
+        }()
+
+        if let list = try? jsonDecoder.decode([EvaluationManifest].self, from: data) {
+            return list
+        }
+        let one = try jsonDecoder.decode(EvaluationManifest.self, from: data)
+        return [one]
     }
 }
 

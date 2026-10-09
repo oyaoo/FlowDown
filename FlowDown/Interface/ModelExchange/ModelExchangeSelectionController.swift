@@ -136,6 +136,7 @@ final class ModelExchangeSelectionController: UIViewController {
     }
 
     @objc private func confirmTapped() {
+        guard !hasCompleted else { return }
         let selected = filteredModels().filter { selectedIds.contains($0.id) }
         guard !selected.isEmpty else {
             presentAlert(
@@ -148,12 +149,12 @@ final class ModelExchangeSelectionController: UIViewController {
             title: "Confirm Sharing",
             message: "Models may contain credentials or secrets. Share with \(appName)?",
         ) { [weak self] context in
-            context.addAction(title: String(localized: "Cancel")) {
+            context.addAction(title: "Cancel") {
                 context.dispose {}
             }
-            context.addAction(title: String(localized: "Share"), attribute: .accent) { [weak self] in
+            context.addAction(title: "Share", attribute: .accent) { [weak self] in
                 context.dispose { [weak self] in
-                    guard let self else { return }
+                    guard let self, !hasCompleted else { return }
                     hasCompleted = true
                     dismiss(animated: true) {
                         self.onConfirm(selected)
@@ -185,8 +186,8 @@ final class ModelExchangeSelectionController: UIViewController {
 
         didShowNoModelsPrompt = true
         let alert = AlertViewController(
-            title: String(localized: "No Models Available"),
-            message: String(localized: "Add models in Settings before sharing."),
+            title: "No Models Available",
+            message: "Add models in Settings before sharing.",
         ) { [weak self] context in
             context.allowSimpleDispose()
             context.addAction(title: "OK", attribute: .accent) {
@@ -347,7 +348,12 @@ extension ModelExchangeSelectionController: UITableViewDataSource, UITableViewDe
     private func handleAppInactive() {
         guard !hasCompleted else { return }
         hasCompleted = true
-        dismiss(animated: true) { [onCancel] in
+        // Dismiss from the presenter so an alert shown above this sheet goes with it.
+        guard let presenter = presentingViewController else {
+            onCancel()
+            return
+        }
+        presenter.dismiss(animated: true) { [onCancel] in
             onCancel()
         }
     }

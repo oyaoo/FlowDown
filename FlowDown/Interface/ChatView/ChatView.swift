@@ -112,6 +112,7 @@ class ChatView: UIView {
         }
 
         sessionManager.executingSessionsPublisher
+            .ensureMainThread()
             .sink { [weak self] executingSessions in
                 guard let self, let conversationID = conversationIdentifier else { return }
                 let isExecuting = executingSessions.contains(conversationID)
@@ -209,8 +210,14 @@ class ChatView: UIView {
     }
 
     func prepareForReuse() {
-        // Removes the current message list view from the superview.
-        currentMessageListView?.removeFromSuperview()
+        if let conversationIdentifier, sessionManager.isSessionExecuting(conversationIdentifier) {
+            // A running stream anchors its tool confirmations to this list view,
+            // so it stays in the view hierarchy and is only hidden.
+            currentMessageListView?.isHidden = true
+        } else {
+            // Removes the current message list view from the superview.
+            currentMessageListView?.removeFromSuperview()
+        }
         conversationIdentifier = nil
         editor.prepareForReuse()
     }
@@ -235,9 +242,12 @@ class ChatView: UIView {
         // ConversationSessionManager.shared.resolvePendingRefresh(for: conversation)
 
         if let listView = currentMessageListView {
-            insertSubview(listView, belowSubview: editorBackgroundView)
-            listView.snp.makeConstraints { make in
-                make.edges.equalToSuperview()
+            // A list view kept attached while hidden already has its constraints.
+            if listView.superview !== self {
+                insertSubview(listView, belowSubview: editorBackgroundView)
+                listView.snp.makeConstraints { make in
+                    make.edges.equalToSuperview()
+                }
             }
             listView.isHidden = false
         }
@@ -331,7 +341,6 @@ extension ChatView {
             let backgroundContainer = ChatHeaderGlassBackgroundContainerView()
         #endif
 
-        let rightClick = RightClickFinder()
         var cancellables: Set<AnyCancellable> = .init()
 
         var onCreateNewChat: (() -> Void)?
@@ -504,15 +513,6 @@ extension ChatView {
             }
         }
 
-        func contextMenuInteraction(
-            _: UIContextMenuInteraction,
-            configurationForMenuAtLocation _: CGPoint,
-        ) -> UIContextMenuConfiguration? {
-            UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
-                self?.buildMenu()
-            }
-        }
-
         private func buildMenu() -> UIMenu? {
             guard let conv else { return nil }
             guard let convMenu = ConversationManager.shared.menu(
@@ -545,23 +545,14 @@ extension ChatView {
                     let templates = ChatTemplateManager.shared.templates
                     var newChatOptions: [UIMenuElement] = []
 
-                    if templates.isEmpty {
-                        // No templates, just show "Start New Chat"
-                        newChatOptions.append(UIAction(
-                            title: String(localized: "Start New Chat"),
-                            image: UIImage(systemName: "plus"),
-                        ) { [weak self] _ in
-                            self?.onCreateNewChat?()
-                        })
-                    } else {
-                        // Show template options
-                        newChatOptions.append(UIAction(
-                            title: String(localized: "Start New Chat"),
-                            image: UIImage(systemName: "plus"),
-                        ) { [weak self] _ in
-                            self?.onCreateNewChat?()
-                        })
+                    newChatOptions.append(UIAction(
+                        title: String(localized: "Start New Chat"),
+                        image: UIImage(systemName: "plus"),
+                    ) { [weak self] _ in
+                        self?.onCreateNewChat?()
+                    })
 
+                    if !templates.isEmpty {
                         var templatesMenuActions: [UIAction] = []
                         for template in templates.values {
                             templatesMenuActions.append(UIAction(

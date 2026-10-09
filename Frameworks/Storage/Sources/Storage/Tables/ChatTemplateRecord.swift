@@ -89,7 +89,10 @@ public final class ChatTemplateRecord: Identifiable, Codable, TableNamed, Device
 
 extension ChatTemplateRecord: Updatable {
     @discardableResult
-    public func update<Value: Equatable>(_ keyPath: ReferenceWritableKeyPath<ChatTemplateRecord, Value>, to newValue: Value) -> Bool {
+    public func update<Value: Equatable>(
+        _ keyPath: ReferenceWritableKeyPath<ChatTemplateRecord, Value>,
+        to newValue: Value
+    ) -> Bool {
         let oldValue = self[keyPath: keyPath]
         guard oldValue != newValue else { return false }
         assign(keyPath, to: newValue)
@@ -98,11 +101,6 @@ extension ChatTemplateRecord: Updatable {
 
     public func assign<Value>(_ keyPath: ReferenceWritableKeyPath<ChatTemplateRecord, Value>, to newValue: Value) {
         self[keyPath: keyPath] = newValue
-        markModified()
-    }
-
-    package func update(_ block: (ChatTemplateRecord) -> Void) {
-        block(self)
         markModified()
     }
 }

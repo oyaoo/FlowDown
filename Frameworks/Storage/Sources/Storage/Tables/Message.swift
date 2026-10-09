@@ -94,7 +94,10 @@ public final class Message: Identifiable, Codable, TableNamed, DeviceOwned, Tabl
 
 extension Message: Updatable {
     @discardableResult
-    public func update<Value: Equatable>(_ keyPath: ReferenceWritableKeyPath<Message, Value>, to newValue: Value) -> Bool {
+    public func update<Value: Equatable>(
+        _ keyPath: ReferenceWritableKeyPath<Message, Value>,
+        to newValue: Value
+    ) -> Bool {
         let oldValue = self[keyPath: keyPath]
         guard oldValue != newValue else { return false }
         assign(keyPath, to: newValue)
@@ -103,11 +106,6 @@ extension Message: Updatable {
 
     public func assign<Value>(_ keyPath: ReferenceWritableKeyPath<Message, Value>, to newValue: Value) {
         self[keyPath: keyPath] = newValue
-        markModified()
-    }
-
-    package func update(_ block: (Message) -> Void) {
-        block(self)
         markModified()
     }
 }

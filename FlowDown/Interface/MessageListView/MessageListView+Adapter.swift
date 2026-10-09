@@ -85,18 +85,13 @@ extension MessageListView {
                 .when { if case .aiContent = $0 { true } else { false } }
                 .height { [weak self] entry, context in
                     guard let self, case let .aiContent(_, message) = entry else { return 0 }
-                    return rowHeight(inListWidth: context.width) { containerWidth in
-                        let sizingView = self.markdownSizingViewPool.view(for: message, theme: self.theme) {
-                            self.markdownPackageCache.package(for: message, theme: self.theme)
-                        }
-                        return ceil(sizingView.boundingSize(for: containerWidth).height)
-                    }
+                    return aiRowHeight(for: message, inListWidth: context.width)
                 }
                 .configure { [weak self] row, entry, _ in
                     guard let self, case let .aiContent(messageID, message) = entry else { return }
                     prepare(row, for: entry)
                     let package = markdownPackageCache.package(for: message, theme: theme)
-                    row.setMarkdownPackage(package, for: messageID)
+                    row.setMarkdownPackage(package, for: messageID, isStreaming: message.isStreaming)
                     row.linkTapHandler = { [weak self, weak row] link, range, touchLocation in
                         guard let self, let row else { return }
                         handleLinkTapped(link, in: range, at: row.convert(touchLocation, to: self))
@@ -180,6 +175,18 @@ extension MessageListView {
         }
     }
 
+    /// The height of an AI message row, measured on a pooled sizing view. The
+    /// row registration and the off-screen preparation both read it, so a row
+    /// prepared ahead of time is mounted at exactly the height it was laid out at.
+    func aiRowHeight(for message: MessageRepresentation, inListWidth listWidth: CGFloat) -> CGFloat {
+        rowHeight(inListWidth: listWidth) { containerWidth in
+            let sizingView = markdownSizingViewPool.view(for: message, theme: theme) {
+                markdownPackageCache.package(for: message, theme: theme)
+            }
+            return ceil(sizingView.boundingSize(for: containerWidth).height)
+        }
+    }
+
     /// Wraps a content height in the shared row insets, mirroring the layout
     /// `MessageListRowView` performs. Returns zero while the list has no width
     /// to lay out in.
@@ -217,8 +224,7 @@ extension MessageListView {
             lookup.append(contentsOf: view.subviews)
             if let label = view as? TextLabelView {
                 if label.selectionRange != nil {
-                    let location = label.convert(location, from: listView)
-                    if label.selectionContains(location) {
+                    if label.selectionContains(location, from: listView) {
                         Logger.ui.debugFile("event is activate on \(label)")
                         return true
                     }
@@ -480,7 +486,11 @@ extension MessageListView {
     }
 
     @discardableResult
-    func presentAndReturnDetailCodeController(code: NSAttributedString, language: String?, title: String) -> UIViewController {
+    func presentAndReturnDetailCodeController(
+        code: NSAttributedString,
+        language: String?,
+        title: String
+    ) -> UIViewController {
         let controller: UIViewController
 
         if language?.lowercased() == "html" {

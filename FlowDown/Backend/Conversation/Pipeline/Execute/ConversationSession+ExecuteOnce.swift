@@ -55,6 +55,7 @@ extension ConversationSession {
         _ requestMessages: inout [ChatRequestBody.Message],
         _ tools: [ChatRequestBody.Tool]?,
         _ modelWillExecuteTools: Bool,
+        _ isImmediateFollowUpAfterToolCall: Bool,
     ) async throws -> Bool {
         await requestUpdate()
         showActivity()
@@ -71,7 +72,6 @@ extension ConversationSession {
         )
         defer { self.stopThinking(for: message.objectId) }
 
-        let isImmediateFollowUpAfterToolCall: Bool = if case .tool = requestMessages.last { true } else { false }
         var pendingToolCalls: [ToolRequest] = []
         var generatedImages: [ImageContent] = []
         let collapseAfterReasoningComplete = ModelManager.shared.collapseReasoningSectionWhenComplete
@@ -91,7 +91,9 @@ extension ConversationSession {
             case let .image(imageContent):
                 // Skip invalid image payloads
                 guard UIImage(data: imageContent.data) != nil else {
-                    Logger.model.warning("skip invalid generated image payload (size: \(imageContent.data.count) bytes)")
+                    Logger.model.warning(
+                        "skip invalid generated image payload (size: \(imageContent.data.count) bytes)"
+                    )
                     break
                 }
                 recordVisibleProgress()
@@ -139,7 +141,10 @@ extension ConversationSession {
 
         if !message.document.isEmpty {
             logger.infoFile("\(message.document)")
-            let document = fixWebReferenceIfPossible(in: message.document, with: linkedContents.mapValues(\.absoluteString))
+            let document = fixWebReferenceIfPossible(
+                in: message.document,
+                with: linkedContents.mapValues(\.absoluteString)
+            )
             message.update(\.document, to: document)
         }
 
@@ -152,11 +157,18 @@ extension ConversationSession {
 
         let trimmedReasoning = message.reasoningContent.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedDocument = message.document.trimmingCharacters(in: .whitespacesAndNewlines)
-        let shouldSilentlyDropEmptyAssistantMessage = isImmediateFollowUpAfterToolCall
-            && trimmedReasoning.isEmpty
+        let producedNothing = trimmedReasoning.isEmpty
             && trimmedDocument.isEmpty
             && generatedImages.isEmpty
             && pendingToolCalls.isEmpty
+
+        // A cancelled consumer ends the stream normally instead of throwing,
+        // so an empty round under cancellation is the user's cancellation.
+        if producedNothing, Task.isCancelled {
+            throw InferenceUserCancellationError()
+        }
+
+        let shouldSilentlyDropEmptyAssistantMessage = isImmediateFollowUpAfterToolCall && producedNothing
 
         if shouldSilentlyDropEmptyAssistantMessage {
             discard(messageIdentifier: message.objectId)
@@ -167,6 +179,11 @@ extension ConversationSession {
         if !trimmedReasoning.isEmpty, trimmedDocument.isEmpty {
             let document = String(localized: "Thinking finished without output any content.")
             message.update(\.document, to: document)
+            if !pendingToolCalls.isEmpty {
+                // The placeholder only keeps the reasoning tile from spinning;
+                // replays must not send it as the assistant's own words.
+                markDocumentAsPlaceholder(message)
+            }
         }
 
         pendingToolCalls = pendingToolCalls.map {
@@ -176,7 +193,7 @@ extension ConversationSession {
         await requestUpdate()
         requestMessages.append(
             .assistant(
-                content: message.document.isEmpty ? nil : .text(message.document),
+                content: trimmedDocument.isEmpty ? nil : .text(message.document),
                 toolCalls: pendingToolCalls.map {
                     .init(id: $0.id, function: .init(name: $0.name, arguments: $0.args))
                 },
@@ -184,7 +201,7 @@ extension ConversationSession {
             ),
         )
 
-        if trimmedDocument.isEmpty, trimmedReasoning.isEmpty, generatedImages.isEmpty, pendingToolCalls.isEmpty {
+        if producedNothing {
             throw NSError(
                 domain: "Inference Service",
                 code: -1,
@@ -200,21 +217,26 @@ extension ConversationSession {
             return false
         }
         guard !pendingToolCalls.isEmpty else { return false }
-        assert(modelWillExecuteTools)
 
         await requestUpdate()
         showActivity(String(localized: "Utilizing tool call"))
 
+        // Tool results must directly follow the assistant turn that requested
+        // them, so attachment messages join the request after every result.
+        var deferredAttachmentMessages: [ChatRequestBody.Message] = []
         for request in pendingToolCalls {
             try checkCancellation()
             guard let tool = await ModelToolsManager.shared.findTool(for: request) else {
                 Logger.chatService.errorFile("unable to find tool for request: \(request)")
-                await Logger.chatService.infoFile("available tools: \(ModelToolsManager.shared.getEnabledToolsIncludeMCP())")
+                await Logger.chatService.infoFile(
+                    "available tools: \(ModelToolsManager.shared.getEnabledToolsIncludeMCP())"
+                )
                 throw NSError(
                     domain: "Tool Error",
                     code: -1,
                     userInfo: [
-                        NSLocalizedDescriptionKey: String(localized: "Unable to process tool request with name: \(request.name)"),
+                        NSLocalizedDescriptionKey:
+                            String(localized: "Unable to process tool request with name: \(request.name)"),
                     ],
                 )
             }
@@ -315,18 +337,10 @@ extension ConversationSession {
                                     data: audio.data,
                                     fileExtension: fileExtension,
                                 )
-                                var suggestedName = audio.name.trimmingCharacters(in: .whitespacesAndNewlines)
-                                if suggestedName.isEmpty {
-                                    suggestedName = if result.audioAttachments.count > 1 {
-                                        String(localized: "Tool Provided Audio #\(index + 1)")
-                                    } else {
-                                        String(localized: "Tool Provided Audio")
-                                    }
-                                }
                                 let attachment = try await RichEditorView.Object.Attachment.makeAudioAttachment(
                                     transcoded: transcoded,
                                     storage: nil,
-                                    suggestedName: suggestedName,
+                                    suggestedName: audio.name,
                                 )
                                 audioAttachments.append(attachment)
                             } catch {
@@ -339,7 +353,9 @@ extension ConversationSession {
                             localized: "Collected \(finalAttachmentCount) attachments from tool \(tool.interfaceName).",
                         ))
 
-                        toolResponseText = collectorMessage.document
+                        toolResponseText = [result.text, collectorMessage.document]
+                            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                            .joined(separator: "\n")
 
                         addAttachments(editorObjects, to: collectorMessage)
                         updateAttachments(editorObjects, for: collectorMessage)
@@ -351,7 +367,7 @@ extension ConversationSession {
                             editorObjects,
                             modelCapabilities: modelCapabilities,
                         )
-                        requestMessages.append(contentsOf: messages)
+                        deferredAttachmentMessages.append(contentsOf: messages)
                     }
 
                     // 64k len is quite large already
@@ -369,7 +385,11 @@ extension ConversationSession {
                     await requestUpdate()
                     let finalToolContent = toolResponseText.trimmingCharacters(in: .whitespacesAndNewlines)
                     requestMessages.append(.tool(
-                        content: .text(finalToolContent.isEmpty ? String(localized: "Tool executed successfully with no output") : toolResponseText),
+                        content: .text(
+                            finalToolContent.isEmpty
+                                ? String(localized: "Tool executed successfully with no output")
+                                : toolResponseText
+                        ),
                         toolCallID: request.id,
                     ))
                 } catch {
@@ -384,10 +404,14 @@ extension ConversationSession {
                     // The row is settled; only then may cancellation abort the
                     // round, otherwise it would stay "running" forever.
                     if cancelled { throw InferenceUserCancellationError() }
-                    requestMessages.append(.tool(content: .text("Tool execution failed. Reason: \(error.localizedDescription)"), toolCallID: request.id))
+                    requestMessages.append(.tool(
+                        content: .text("Tool execution failed. Reason: \(error.localizedDescription)"),
+                        toolCallID: request.id
+                    ))
                 }
             }
         }
+        requestMessages.append(contentsOf: deferredAttachmentMessages)
 
         await requestUpdate()
         return true

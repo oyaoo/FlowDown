@@ -123,7 +123,7 @@ class ChatTemplateEditorController: StackScrollController, UITextViewDelegate {
 
         let input = AlertInputViewController(
             title: "Rewrite",
-            message: String(localized: "You can use \(modelName) to rewrite this template, e.g., 'Add more instructions to the template.', or 'Make it more concise.'..."),
+            message: "You can use \(modelName) to rewrite this template, e.g., 'Add more instructions to the template.', or 'Make it more concise.'...",
             placeholder: "Enter instructions...",
             text: "",
         ) { [self] instructions in
@@ -231,7 +231,9 @@ class ChatTemplateEditorController: StackScrollController, UITextViewDelegate {
         promptBehaviorView.configure(icon: .init(systemName: "gear"))
         promptBehaviorView.configure(title: "Application Prompt Behavior")
         promptBehaviorView.configure(description: "Regarding whether the prompt from the application should be inherited or ignored when creating a new conversation from this template.")
-        let behaviorTitle = template.inheritApplicationPrompt ? String(localized: "Inherit") : String(localized: "Ignore")
+        let behaviorTitle = template.inheritApplicationPrompt
+            ? String(localized: "Inherit")
+            : String(localized: "Ignore")
         promptBehaviorView.configure(value: behaviorTitle)
         promptBehaviorView.use {
             [

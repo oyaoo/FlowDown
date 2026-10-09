@@ -118,7 +118,9 @@ extension ModelManager {
                         ),
                     )
                 } else {
-                    Logger.model.debugFile("model \(model.model_identifier) generates output for test case: \(trimmedContent)")
+                    Logger.model.debugFile(
+                        "model \(model.model_identifier) generates output for test case: \(trimmedContent)"
+                    )
                     completion(.success(()))
                 }
             } catch {
@@ -148,7 +150,10 @@ extension ModelManager {
                             NSError(
                                 domain: "Model",
                                 code: -1,
-                                userInfo: [NSLocalizedDescriptionKey: String(localized: "Model did not produce any textual output.")],
+                                userInfo: [
+                                    NSLocalizedDescriptionKey:
+                                        String(localized: "Model did not produce any textual output.")
+                                ],
                             ),
                         ),
                     )
@@ -275,22 +280,19 @@ extension ModelManager {
     func prepareRequestBody(
         modelID: ModelIdentifier,
         messages: [ChatRequestBody.Message],
-    ) throws -> [ChatRequestBody.Message] {
-        var messages = messages
-        if let model = cloudModel(identifier: modelID) {
-            // this model requires developer mode to work
-            if model.capabilities.contains(.developerRole) {
-                messages = messages.map { message in
-                    switch message {
-                    case let .system(content, name):
-                        .developer(content: content, name: name)
-                    default:
-                        message
-                    }
-                }
+    ) -> [ChatRequestBody.Message] {
+        // this model requires developer mode to work
+        guard let model = cloudModel(identifier: modelID), model.capabilities.contains(.developerRole) else {
+            return messages
+        }
+        return messages.map { message in
+            switch message {
+            case let .system(content, name):
+                .developer(content: content, name: name)
+            default:
+                message
             }
         }
-        return messages
     }
 
     func infer(
@@ -323,7 +325,7 @@ extension ModelManager {
             for: modelID,
             additionalBodyField: modelBodyFields(for: modelID),
         )
-        var body = try ChatRequestBody(
+        var body = ChatRequestBody(
             messages: prepareRequestBody(modelID: modelID, messages: input),
             maxCompletionTokens: maxCompletionTokens,
             temperature: temperature < 0 ? nil : .init(temperature),
@@ -334,12 +336,19 @@ extension ModelManager {
         return (client, body)
     }
 
+    /// - Parameter failsOnCollectedErrors: Remote clients record a dropped
+    ///   connection in `collectedErrors` and still end their stream normally.
+    ///   By default such an error is surfaced only when no text arrived, so
+    ///   callers keep partial output. Pass `true` when a truncated result must
+    ///   not be accepted; the stream then throws whenever an error was
+    ///   collected, even after text.
     func streamingInfer(
         with modelID: ModelIdentifier,
         maxCompletionTokens: Int? = nil,
         input: [ChatRequestBody.Message],
         tools: [ChatRequestBody.Tool]? = nil,
         toolChoice: ChatRequestBody.ToolChoice? = nil,
+        failsOnCollectedErrors: Bool = false,
     ) async throws -> AsyncThrowingStream<ChatResponseChunk, Error> {
         let (client, body) = try makeRequest(
             modelID: modelID,
@@ -349,26 +358,20 @@ extension ModelManager {
             toolChoice: toolChoice,
         )
         return AsyncThrowingStream(ChatResponseChunk.self, bufferingPolicy: .unbounded) { cont in
-            Task.detached {
-                let reasoningEmitter = BalancedEmitter(
-                    duration: 1.0,
-                    frequency: 30,
-                ) { chunk in
-                    cont.yield(.reasoning(chunk))
-                }
-                let textEmitter = BalancedEmitter(
-                    duration: 0.5,
-                    frequency: 20,
-                ) { chunk in
-                    cont.yield(.text(chunk))
-                }
-                cont.onTermination = { _ in
-                    Task.detached {
-                        await reasoningEmitter.cancel()
-                        await textEmitter.cancel()
-                    }
-                }
+            let reasoningEmitter = BalancedEmitter(
+                duration: 1.0,
+                frequency: 30,
+            ) { chunk in
+                cont.yield(.reasoning(chunk))
+            }
+            let textEmitter = BalancedEmitter(
+                duration: 0.5,
+                frequency: 20,
+            ) { chunk in
+                cont.yield(.text(chunk))
+            }
 
+            let producer = Task.detached {
                 // 这个逻辑是这样的 如果 UI 吃到了太多的数据 布局一次可能要 0.1 秒
                 // 布局完毕以后不会卡 但是一直在布局就会很卡
                 // 所以如果输出超过 n 字 就停止使用 emitter
@@ -404,20 +407,35 @@ extension ModelManager {
                     await textEmitter.wait()
                     if emotionalDamage == 0 {
                         Logger.model.debugFile("model \(modelID) generated no text output in streaming inference")
-                        if let error = client.collectedErrors {
-                            cont.finish(throwing: NSError(
-                                domain: "Model",
-                                code: -1,
-                                userInfo: [NSLocalizedDescriptionKey: error],
-                            ))
-                            return
-                        }
+                    }
+                    if emotionalDamage == 0 || failsOnCollectedErrors,
+                       let error = client.collectedErrors
+                    {
+                        cont.finish(throwing: NSError(
+                            domain: "Model",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: error],
+                        ))
+                        return
                     }
                     cont.finish()
                     return
                 } catch {
                     cont.finish(throwing: error)
                     return
+                }
+            }
+
+            // Stopping the consumer must stop the model too: the inner stream
+            // only releases its work (such as the MLX queue permit or the
+            // Apple Intelligence session) when its own consumer, the producer,
+            // is cancelled. Cancelling the emitters resumes a producer parked
+            // in wait() so it can observe that cancellation.
+            cont.onTermination = { _ in
+                producer.cancel()
+                Task.detached {
+                    await reasoningEmitter.cancel()
+                    await textEmitter.cancel()
                 }
             }
         }
